@@ -1,0 +1,1 @@
+YANDEX_TOKEN = "y0__xCnvsGHBxje-AYgoMOThBU3IImIumuii4Ez04uzVxaRin526Q"
