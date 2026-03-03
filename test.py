@@ -6,6 +6,11 @@ from services import soundcloud
 ###################### SOUNDCLOUD ######################
 async def main():
     z = soundcloud.SoundCloud()
+    b = await z.search_tracks('Ivoxygen')
+    print(b)
+    for t in b:
+        print(t.title_formated)
+    return
     v = await z.resolve('https://soundcloud.com/fugu-fish-153361132/sets')
     # print(json.dumps(v.to_dict(), indent=4))
     if isinstance(v, soundcloud.User):
