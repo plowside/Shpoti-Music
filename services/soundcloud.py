@@ -1,32 +1,34 @@
 import async_tls_client
 import asyncio
-import json
 import logging
 
 from typing import List, Dict, Optional, Any
 from urllib.parse import urlparse
 
-from frida_tools.application import await_enter
-
 logging.basicConfig(level=logging.DEBUG)
 
-class User:
+
+class _SCModel:
     def __init__(self, data: dict, sc: "SoundCloud" = None):
         self._data = data or {}
         self._sc = sc if sc else SoundCloud()
+        self._bind_data()
 
-        for k, v in self._data.items():
-            setattr(self, k, v)
+    def _bind_data(self):
+        for key, value in self._data.items():
+            setattr(self, key, value)
 
     def to_dict(self):
         return dict(self._data)
 
+
+class User(_SCModel):
     async def get_playlists(self, limit: int = 200):
         playlists = await self._sc.get_user_playlists(self.id, limit=limit)
         return [Playlist(p, sc=self._sc) for p in playlists]
 
 
-class Playlist:
+class Playlist(_SCModel):
     artwork_url: Optional[str]
     created_at: Optional[str]
     description: Optional[str]
@@ -61,21 +63,10 @@ class Playlist:
     tracks: Optional[List[Dict[str, Any]]]
     track_count: Optional[int]
 
-    def __init__(self, data: dict, sc: "SoundCloud" = None):
-        self._data = data or {}
-        self._sc = sc if sc else SoundCloud()
-
-        for k, v in self._data.items():
-            setattr(self, k, v)
-
-    def to_dict(self):
-        return dict(self._data)
-
     async def refresh(self):
         data = await self._sc.get_playlist(self.id)
         self._data = data or {}
-        for k, v in self._data.items():
-            setattr(self, k, v)
+        self._bind_data()
         return self
 
     async def get_tracks(self, fetch_full_info: bool = True):
@@ -86,7 +77,7 @@ class Playlist:
         return [Track(t, sc=self._sc) for t in tracks]
 
 
-class Track:
+class Track(_SCModel):
     artwork_url: Optional[str]
     caption: Optional[str]
     commentable: Optional[bool]
@@ -136,21 +127,10 @@ class Track:
     user: Optional[Dict[str, Any]]
     title_formated: Optional[str]
 
-    def __init__(self, data: dict, sc: "SoundCloud" = None):
-        self._data = data or {}
-        self._sc = sc if sc else SoundCloud()
-
-        for k, v in self._data.items():
-            setattr(self, k, v)
-
-    def to_dict(self):
-        return dict(self._data)
-
     async def refresh(self):
         data = await self._sc.get_track(self.id)
         self._data = data or {}
-        for k, v in self._data.items():
-            setattr(self, k, v)
+        self._bind_data()
         return self
 
 
@@ -158,13 +138,19 @@ class Track:
 class SoundCloud:
     def __init__(self):
         self.session = async_tls_client.AsyncSession(random_tls_extension_order=True)
-        self.soundcloud_domain = 'soundcloud.com'
-        self.client_id = '1IzwHiVxAHeYKAMqN0IIGD3ZARgJy2kl'
+        self.SOUNDCLOUD_DOMAIN = 'soundcloud.com'
         self.RESOLVE_URL = 'https://api-v2.soundcloud.com/resolve?url={url}&client_id={client_id}'
         self.USER_PLAYLISTS_URL = 'https://api-v2.soundcloud.com/users/{user_id}/playlists_without_albums'
         self.PLAYLIST_URL = 'https://api-v2.soundcloud.com/playlists/{playlist_id}'
         self.TRACK_URL = 'https://api-v2.soundcloud.com/tracks/{track_id}'
         self.TRACKS_BATCH_URL = 'https://api-v2.soundcloud.com/tracks?ids={tracks_ids}&client_id={client_id}'
+
+        # AUTH PART
+        self.client_id_public = '1IzwHiVxAHeYKAMqN0IIGD3ZARgJy2kl'
+        self.client_id = None
+        self.client_secret = None
+        self.redirect_uri = None
+        self.access_token = None
 
         self.headers = {
             'Accept': 'application/json, text/javascript, */*; q=0.1',
@@ -183,23 +169,6 @@ class SoundCloud:
             'sec-ch-ua-platform': '"Windows"',
         }
 
-    async def resolve(self, url: str):
-        if urlparse(url).netloc != self.soundcloud_domain:
-            url = await self.follow_url(url)
-            if not url:
-                raise ValueError(f'Not soundcloud domain: {url}')
-        req = await self.session.get(self.RESOLVE_URL.format(url=url, client_id=self.client_id), headers=self.headers)
-        req_json = req.json()
-        kind = req_json['kind'] # user | playlist | system-playlist | track
-        logging.info(f'[+] Resolved {kind}')
-        if kind == 'user':
-            return self.user_from(req_json)
-        elif kind in ('playlist', 'system-playlist'):
-            return self.playlist_from(req_json)
-        elif kind == 'track':
-            return self.track_from(req_json)
-        return req_json
-
     def user_from(self, data: dict):
         return User(data, sc=self)
 
@@ -209,11 +178,51 @@ class SoundCloud:
     def track_from(self, data: dict):
         return Track(data, sc=self)
 
+    async def _request(self, method: str, url: str, params: Optional[Dict[str, Any]] = None, payload: Optional[Dict[str, Any] | str] = None, use_auth: bool = False, allow_redirects: bool = True, return_req_obj: bool = False):
+        headers = self.headers.copy()
+        if use_auth:
+            if not self.access_token:
+                raise ValueError('ACCESS_TOKEN is required for this request')
+            headers['Authorization'] = f'OAuth {self.access_token}'
+        try:
+            req = await self.session.execute_request(
+                url=url, params=params, headers=headers,method=method.upper(), allow_redirects=allow_redirects,
+                **{'json' if isinstance(payload, dict) else 'data': payload})
+            return req if return_req_obj else req.json()
+        except Exception as e:
+            # err_body = exc.read().decode("utf-8", errors="replace")
+            # raise SoundCloudApiError(f"HTTP {exc.code} {exc.reason} for {method} {path}: {err_body}") from exc
+            logging.error(f'Error on request {url}: {e}')
+            return None
+
+    async def _get_json(self, url: str, params: Optional[dict] = None):
+        req = await self.session.get(url, headers=self.headers, params=params)
+        return req.json()
+
+    async def resolve(self, url: str):
+        if urlparse(url).netloc != self.SOUNDCLOUD_DOMAIN:
+            url = await self.follow_url(url)
+            if not url:
+                raise ValueError(f'Not soundcloud domain: {url}')
+        resp = await self._request('GET', self.RESOLVE_URL.format(url=url, client_id=self.client_id_public))
+        kind = resp['kind']
+        logging.info(f'[+] Resolved {kind}')
+        parsers = {
+            'user': self.user_from,
+            'playlist': self.playlist_from,
+            'system-playlist': self.playlist_from,
+            'track': self.track_from,
+        }
+        parser = parsers.get(kind)
+        if parser:
+            return parser(resp)
+        return resp
+
     async def follow_url(self, url: str):
         try:
             logging.info(f'Requesting {url}')
-            req = await self.session.get(url, headers=self.headers, allow_redirects=True)
-            if urlparse(req.url).netloc != self.soundcloud_domain:
+            req = await self._request('GET', url, allow_redirects=True, return_req_obj=True)
+            if urlparse(req.url).netloc != self.SOUNDCLOUD_DOMAIN:
                 logging.info(f'Request followed to unknown url: {req.url}')
                 return None
             logging.info(f'Request followed to soundcloud url: {req.url}')
@@ -224,18 +233,18 @@ class SoundCloud:
 
     async def get_user_playlists(self, user_id: int, limit: int = 200):
         params = {
-            'client_id': self.client_id,
+            'client_id': self.client_id_public,
             'limit': str(limit),
             'offset': '0',
             'linked_partitioning': '1',
         }
+        url = self.USER_PLAYLISTS_URL.format(user_id=user_id)
         all_items = []
         while True:
-            req = await self.session.get(self.USER_PLAYLISTS_URL.format(user_id=user_id), headers=self.headers, params=params)
-            data = req.json()
-            collection = data.get('collection') or []
+            resp = await self._request('GET', url, params=params)
+            collection = resp.get('collection') or []
             all_items.extend(collection)
-            next_href = data.get('next_href')
+            next_href = resp.get('next_href')
             if not next_href:
                 break
             url = next_href
@@ -243,34 +252,40 @@ class SoundCloud:
         return all_items
 
     async def get_playlist(self, playlist_id: int):
-        params = {'client_id': self.client_id}
-        url = self.PLAYLIST_URL.format(playlist_id=playlist_id)
-        req = await self.session.get(url, headers=self.headers, params=params)
-        return req.json()
+        return await self._request('GET',
+            self.PLAYLIST_URL.format(playlist_id=playlist_id),
+            params={'client_id': self.client_id_public}
+        )
 
     async def get_track(self, track_id: int | list):
         if isinstance(track_id, list):
             return await self.get_tracks_batch(track_id)
-        req = await self.session.get(self.TRACK_URL.format(track_id=track_id), headers=self.headers, params={'client_id': self.client_id})
-        return req.json()
+        track = await self._request('GET',
+            self.TRACK_URL.format(track_id=track_id),
+            params={'client_id': self.client_id_public},
+        )
+        return self._format_track_title(track)
+
+    @staticmethod
+    def _format_track_title(track: dict):
+        artist = None
+        if '-' not in track.get('title', ''):
+            publisher_metadata = track.get('publisher_metadata', {})
+            artist = publisher_metadata.get('artist', None) if publisher_metadata else None
+            if not artist:
+                artist = track.get('user', {}).get('username', None)
+
+        track['title_formated'] = f"{track.get('title', '')}{' - ' + artist if artist else ''}"
+        return track
 
     async def _fetch_tracks_batch(self, batch_ids: List[str]):
         batch = ','.join(batch_ids)
-        req = await self.session.get(
-            self.TRACKS_BATCH_URL.format(tracks_ids=batch, client_id=self.client_id),
-            headers=self.headers,
+        resp = await self._request('GET',
+            self.TRACKS_BATCH_URL.format(tracks_ids=batch, client_id=self.client_id_public),
         )
         tracks = []
-        for t in req.json().copy():
-            if '-' not in t['title']: #t.get('user', {}).get('verified', False):
-                publisher_metadata = t.get('publisher_metadata', {})
-                artist = publisher_metadata.get('artist', None) if publisher_metadata else None
-                if not artist:
-                    artist = t.get('user', {}).get('username', None)
-            else:
-                artist = None
-            t['title_formated'] = f"{t['title']}{' - '+artist if artist else ''}"
-            tracks.append(t)
+        for track in resp.copy():
+            tracks.append(self._format_track_title(track))
         return tracks
 
     async def get_tracks_batch(self, tracks_ids: list):
@@ -284,6 +299,6 @@ class SoundCloud:
         results = await asyncio.gather(*tasks)
 
         tracks: List[dict] = []
-        for chunk in results:
-            tracks.extend(chunk)
+        for track in results:
+            tracks.extend(track)
         return tracks
