@@ -1,10 +1,8 @@
 import logging
 import yandex_music
 
-from typing import List, Dict, Optional
-from yandex_music import Playlist, TrackShort
-
-from config import *
+from typing import List, Dict
+from yandex_music import TrackShort
 
 class YandexMusic:
 	def __init__(self, yandex_token: str):
@@ -44,7 +42,8 @@ class YandexMusic:
 		track_data = self.format_track(track)
 		return track_data
 
-	def format_track(self, track):
+	@staticmethod
+	def format_track(track):
 		if isinstance(track, TrackShort):
 			track = track.track
 		if isinstance(track, list):

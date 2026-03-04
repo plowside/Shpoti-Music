@@ -1,9 +1,12 @@
 ﻿import json
 import secrets
 import sys
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
+import webbrowser
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional
 
 
@@ -12,27 +15,31 @@ from typing import Any, Dict, List, Optional
 # =========================
 CLIENT_ID = "cIYxtC61UuswkJN1H7looUKPUL3beAqj"
 CLIENT_SECRET = "nyHItX1eTNfC8TpjhhVFstmo0ia4dwpU"
-REDIRECT_URI = "https://t.me/LUCKYBANANA5894"
 PUBLIC_CLIENT_ID = "1IzwHiVxAHeYKAMqN0IIGD3ZARgJy2kl"
 
-# After first OAuth step, paste token here.
-ACCESS_TOKEN = "eyJraWQiOiJzYy13dVlRRjRjIiwidHlwIjoiYXQrSldUIiwiYWxnIjoiUlMyNTYifQ.eyJzdWIiOiJzb3VuZGNsb3VkOnVzZXJzOjE0Mjg1OTg2MDgiLCJhdWQiOiJodHRwczovL3NvdW5kY2xvdWQuY29tIiwic2NvcGUiOiIiLCJpc3MiOiJodHRwczovL3NlY3VyZS5zb3VuZGNsb3VkLmNvbSIsImNhaSI6IjMyNzIzMCIsImV4cCI6MTc3MjU0MjM4NiwiaWF0IjoxNzcyNTM4Nzg2LCJqdGkiOiI3NDYwYTUxMi1lZjI2LTRhZTAtOTE5Yi1kMzc5M2I0NTM3YTEiLCJjbGllbnRfaWQiOiJjSVl4dEM2MVV1c3drSk4xSDdsb29VS1BVTDNiZUFxaiIsInNpZCI6IjAxS0pTUlBXVk1FQTZFSDY5UlhZNVRBQUpBIn0.apnKs908hV1vgp_gyFBiJ5IsZnJA2DYbhnBK4GX_CIc1NrczLVEpefKBHobYBCmixrzkiQ4na3ukuVlXDX311W_wy70iT-0hSLVWpzReywUynVHuPnGKcyEe9YsS5DUPL1XtMyYCSvxBP2ZVYGhyP7h0n6Epq79D-VcpYjHyOmJRq9KgDz6hd2gzmIzhWOH7iIhZWVjIcGXeOXTdMs8YSUgxtR7ulzxakH36utERJGSY-F3BCeb27Eh9QK_hXNV3DUuDGhgAsREM7soZKo-yNm1cxxgOl8VigWXu2lHBZpR61-zSvrqsXh7RT8ZLJrMwpKcIIwRLoxTLNv36mA9K-Q"
+LOCAL_CALLBACK_HOST = "127.0.0.1"
+LOCAL_CALLBACK_PORT = 9067
+LOCAL_CALLBACK_PATH = "/callback"
+OAUTH_WAIT_TIMEOUT_SECONDS = 180
+OPEN_AUTH_URL_IN_BROWSER = True
 
 # Modes: "authorize", "search", "create", "add", "create_from_names", "me"
-MODE = "create"
+MODE = "create_from_names"
 
 # For MODE="search"
-SEARCH_QUERY = "Ivoxygen "
+SEARCH_QUERY = "Ivoxygen new"
 SEARCH_LIMIT = 10
 
 # For MODE="create"
-PLAYLIST_TITLE = "My Playlist"
-PLAYLIST_DESCRIPTION = "Created via raw SoundCloud API"
-PLAYLIST_PUBLIC = False
+PLAYLIST_TITLE = "my playlist"
+PLAYLIST_DESCRIPTION = "Created via SoundCloud API"
+PLAYLIST_PUBLIC = True
 CREATE_TRACK_IDS: List[int] = [
-    254111917,
-    254112221,
-    254111788
+    306470944,
+    2216251388,
+    1191493201,
+    2216330357,
+    93331125,
 ]
 
 # For MODE="add"
@@ -42,20 +49,108 @@ TRACK_IDS_TO_ADD: List[int] = [
     1858590672,
     2080104336,
     1933341872,
-    2185252199
+    2185252199,
 ]
 
 # For MODE="create_from_names"
-AUTO_PLAYLIST_TITLE = "Auto Playlist"
-AUTO_PLAYLIST_PUBLIC = False
-TRACK_NAMES: List[str] = [
-    "Daft Punk One More Time",
-    "The Weeknd Blinding Lights",
-]
+AUTO_PLAYLIST_TITLE = "Auto Playlist ZZZ"
+AUTO_PLAYLIST_PUBLIC = True
+TRACK_NAMES: List[str] = '''Cornfield Chase - Hans Zimmer
+check - bbno$
+СВЕТЛАНА! - NEXTIME
+the prom - glaive
+the girl next door - IVOXYGEN
+Mutter - Rammstein
+Resist and Disorder - Rezodrone, The Cartesian Duelists
+Где мой дом? - IC3PEAK
+попал - tewiq
+Empathy - Crystal Castles
+vertigo - rizza
+Боль - quiizzzmeow, Мэйби Бэйби
+мелатонин - плм
+псы попадут в рай - плм
+Cornfield Chase - Hans Zimmer'''.splitlines()
 
 
 class SoundCloudApiError(RuntimeError):
     pass
+
+
+class LocalOAuthCallbackServer:
+    def __init__(self, host: str, port: int, callback_path: str) -> None:
+        self.host = host
+        self.port = port
+        self.callback_path = callback_path
+        self._server: Optional[ThreadingHTTPServer] = None
+        self._thread: Optional[threading.Thread] = None
+        self._event = threading.Event()
+        self._result: Dict[str, Optional[str]] = {"code": None, "state": None, "error": None}
+
+    def _make_handler(self):
+        parent = self
+
+        class CallbackHandler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                parsed = urllib.parse.urlparse(self.path)
+                if parsed.path != parent.callback_path:
+                    self.send_response(404)
+                    self.send_header("Content-Type", "text/plain; charset=utf-8")
+                    self.end_headers()
+                    self.wfile.write(b"Not Found")
+                    return
+
+                params = urllib.parse.parse_qs(parsed.query)
+                parent._result["code"] = (params.get("code") or [None])[0]
+                parent._result["state"] = (params.get("state") or [None])[0]
+                parent._result["error"] = (params.get("error") or [None])[0]
+                parent._event.set()
+
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                html = (
+                    "<html><body><h3>Authorization received.</h3>"
+                    "<p>You can close this tab and return to the script.</p></body></html>"
+                )
+                self.wfile.write(html.encode("utf-8"))
+
+            def log_message(self, format: str, *args: Any) -> None:
+                return
+
+        return CallbackHandler
+
+    def __enter__(self) -> "LocalOAuthCallbackServer":
+        self.start()
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.stop()
+
+    def start(self) -> None:
+        if self._server is not None:
+            return
+        self._event.clear()
+        self._result = {"code": None, "state": None, "error": None}
+        handler = self._make_handler()
+        self._server = ThreadingHTTPServer((self.host, self.port), handler)
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        if self._server is None:
+            return
+        self._server.shutdown()
+        self._server.server_close()
+        if self._thread is not None:
+            self._thread.join(timeout=2)
+        self._thread = None
+        self._server = None
+
+    def wait_for_result(self, timeout_seconds: int) -> Optional[Dict[str, Optional[str]]]:
+        ok = self._event.wait(timeout=timeout_seconds)
+        if not ok:
+            return None
+        return dict(self._result)
 
 
 class SoundCloudOAuth:
@@ -110,6 +205,47 @@ class SoundCloudOAuth:
                 last_error = exc
 
         raise SoundCloudApiError(f"OAuth token request failed: {last_error}")
+
+
+def build_local_redirect_uri() -> str:
+    return f"http://localhost:{LOCAL_CALLBACK_PORT}{LOCAL_CALLBACK_PATH}"
+
+
+def authorize_and_get_token() -> str:
+    redirect_uri = build_local_redirect_uri()
+    oauth = SoundCloudOAuth(CLIENT_ID, CLIENT_SECRET, redirect_uri)
+    state = secrets.token_urlsafe(16)
+    auth_url = oauth.build_authorize_url(state)
+
+    with LocalOAuthCallbackServer(LOCAL_CALLBACK_HOST, LOCAL_CALLBACK_PORT, LOCAL_CALLBACK_PATH) as server:
+        print("Open authorization URL:")
+        print(auth_url)
+        if OPEN_AUTH_URL_IN_BROWSER:
+            try:
+                webbrowser.open(auth_url)
+            except Exception:
+                pass
+
+        print(f"Waiting callback on {redirect_uri} ...")
+        result = server.wait_for_result(OAUTH_WAIT_TIMEOUT_SECONDS)
+
+    if result is None:
+        raise SoundCloudApiError("OAuth callback timeout")
+    if result.get("error"):
+        raise SoundCloudApiError(f"OAuth error: {result['error']}")
+    if result.get("state") and result["state"] != state:
+        raise SoundCloudApiError("OAuth state mismatch")
+
+    code = result.get("code") or ""
+    if not code:
+        raise SoundCloudApiError("No authorization code received")
+
+    token_data = oauth.exchange_code_for_token(code)
+    access_token = token_data.get("access_token") or ""
+    if not access_token:
+        raise SoundCloudApiError(f"OAuth response has no access_token: {token_data}")
+
+    return access_token
 
 
 class SoundCloudAPI:
@@ -226,12 +362,12 @@ class SoundCloudAPI:
                 "title": title,
                 "description": description,
                 "sharing": "public" if public else "private",
-                "tracks": [{"id": int(track_id)} for track_id in (track_ids or [])],
+                "tracks": [{"id": str(track_id)} for track_id in (track_ids or [])],
             }
         }
         return self._request(
             "POST",
-            f"/playlists",
+            "/playlists",
             body=body,
             use_auth=True,
             base_url=self.AUTH_BASE_URL,
@@ -250,7 +386,7 @@ class SoundCloudAPI:
     def update_playlist_tracks(self, playlist_id: int, track_ids: List[int]) -> Dict[str, Any]:
         body = {
             "playlist": {
-                "tracks": [{"id": int(track_id)} for track_id in track_ids],
+                "tracks": [{"id": str(track_id)} for track_id in track_ids],
             }
         }
         return self._request(
@@ -283,30 +419,6 @@ def print_track(track: Dict[str, Any]) -> None:
     title = track.get("title", "")
     artist = (track.get("user") or {}).get("username", "")
     print(f"{track_id}\t{title}\t{artist}")
-
-
-def mode_authorize() -> None:
-    oauth = SoundCloudOAuth(CLIENT_ID, CLIENT_SECRET, REDIRECT_URI)
-    state = secrets.token_urlsafe(16)
-    url = oauth.build_authorize_url(state)
-
-    print("1) Open this URL in browser and allow access:")
-    print(url)
-    print("\n2) Copy `code` from redirect URL and paste below.")
-    print("   Redirect example: https://your-redirect?code=...&state=...")
-
-    code = input("\nPaste code here: ").strip()
-    if not code:
-        raise SoundCloudApiError("No code provided")
-
-    token_data = oauth.exchange_code_for_token(code)
-    access_token = token_data.get("access_token", "")
-
-    print("\nOAuth response:")
-    print(json.dumps(token_data, ensure_ascii=False, indent=2))
-    if access_token:
-        print("\nPaste this into ACCESS_TOKEN in script:")
-        print(access_token)
 
 
 def mode_search(api: SoundCloudAPI) -> None:
@@ -389,21 +501,26 @@ def mode_me(api: SoundCloudAPI) -> None:
 def main() -> int:
     try:
         mode = MODE.strip().lower()
+        auth_required_modes = {"authorize", "me", "create", "add", "create_from_names"}
 
-        if mode == "authorize":
-            mode_authorize()
-            return 0
+        access_token: Optional[str] = None
+        if mode in auth_required_modes:
+            access_token = authorize_and_get_token()
+            print("OAuth authorization completed")
 
         api = SoundCloudAPI(
-            access_token=ACCESS_TOKEN or None,
+            access_token=access_token,
             client_id=CLIENT_ID,
             public_client_id=PUBLIC_CLIENT_ID,
         )
 
-        if mode in {"me", "create", "add", "create_from_names"} and not ACCESS_TOKEN:
-            raise SoundCloudApiError("Set ACCESS_TOKEN in script or use MODE='authorize' first")
-
-        if mode == "search":
+        if mode == "authorize":
+            me = api.get_me()
+            print(json.dumps({
+                "id": me.get("id"),
+                "username": me.get("username"),
+            }, ensure_ascii=False, indent=2))
+        elif mode == "search":
             mode_search(api)
         elif mode == "create":
             mode_create(api)

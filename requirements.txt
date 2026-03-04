@@ -1,0 +1,8 @@
+uvicorn
+aiofiles
+aiohttp
+loguru
+fastapi
+async_tls_client
+tls_client
+yandex-music
