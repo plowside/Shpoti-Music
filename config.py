@@ -1,5 +1,5 @@
 ################### YANDEX MUSIC #####################
-YANDEX_TOKEN = ""
+YANDEX_TOKEN = "y0__xCnvsGHBxje-AYgoMOThBU3IImIumuii4Ez04uzVxaRin526Q"
 
 #################### SOUNDCLOUD ######################
 SC_CLIENT_ID = 'cIYxtC61UuswkJN1H7looUKPUL3beAqj'
